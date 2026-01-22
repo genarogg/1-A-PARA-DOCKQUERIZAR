@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Gestor de instancias multi-sesión para SysBank
+Gestor de instancias multi-sesion para SysBank
 Cada navegador obtiene su propia instancia aislada
 """
 
@@ -12,12 +13,13 @@ import time
 import uuid
 import signal
 import json
+import socket
 from pathlib import Path
 
 app = Flask(__name__)
 CORS(app)
 
-# Configuración
+# Configuracion
 BASE_DISPLAY = 99
 BASE_VNC_PORT = 5900
 BASE_NOVNC_PORT = 6080
@@ -27,6 +29,17 @@ INSTANCE_TIMEOUT = 3600  # 1 hora de inactividad
 
 # Almacenamiento de instancias activas
 instances = {}
+
+def check_port_open(host, port, timeout=1):
+    """Verifica si un puerto esta abierto"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except:
+        return False
 
 def get_next_available_ports():
     """Encuentra los siguientes puertos disponibles"""
@@ -44,18 +57,40 @@ def get_next_available_ports():
     
     return None, None, None
 
+def wait_for_port(port, timeout=30, check_interval=0.5):
+    """Espera a que un puerto este disponible"""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if check_port_open('localhost', port):
+            return True
+        time.sleep(check_interval)
+    return False
+
 def create_instance(session_id):
     """Crea una nueva instancia de SysBank"""
     if len(instances) >= MAX_INSTANCES:
+        print("ERROR: Limite de instancias alcanzado: {}/{}".format(len(instances), MAX_INSTANCES))
         return None
     
     display, vnc_port, novnc_port = get_next_available_ports()
     if display is None:
+        print("ERROR: No hay puertos disponibles")
         return None
     
-    instance_id = f"sysbank_{session_id}"
+    instance_id = "sysbank_{}".format(session_id)
+    instance_path = Path(INSTANCE_DIR) / instance_id
+    
+    print("\n" + "="*60)
+    print("Creando instancia: {}".format(instance_id))
+    print("   Display: :{}".format(display))
+    print("   VNC Port: {}".format(vnc_port))
+    print("   noVNC Port: {}".format(novnc_port))
+    print("="*60)
     
     try:
+        # Crear directorio de la instancia
+        instance_path.mkdir(parents=True, exist_ok=True)
+        
         # Iniciar la instancia
         process = subprocess.Popen([
             '/app/start-instance.sh',
@@ -63,8 +98,13 @@ def create_instance(session_id):
             str(display),
             str(vnc_port),
             str(novnc_port)
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ], 
+        stdout=subprocess.PIPE, 
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1)
         
+        # Registrar instancia inmediatamente
         instances[session_id] = {
             'id': instance_id,
             'display': display,
@@ -76,44 +116,92 @@ def create_instance(session_id):
             'status': 'starting'
         }
         
-        # Esperar a que la instancia esté lista
-        time.sleep(5)
-        instances[session_id]['status'] = 'running'
-        
-        return instances[session_id]
+        # Esperar a que noVNC este disponible
+        print("Esperando a que noVNC este disponible en puerto {}...".format(novnc_port))
+        if wait_for_port(novnc_port, timeout=30):
+            print("OK: noVNC listo en puerto {}".format(novnc_port))
+            instances[session_id]['status'] = 'running'
+            
+            # Mostrar logs de inicio
+            log_files = ['xvfb.log', 'vnc.log', 'novnc.log', 'sysbank.log']
+            for log_file in log_files:
+                log_path = instance_path / log_file
+                if log_path.exists():
+                    print("\nLOG {}:".format(log_file))
+                    with open(log_path) as f:
+                        lines = f.readlines()
+                        for line in lines[-5:]:  # Ultimas 5 lineas
+                            print("   {}".format(line.rstrip()))
+            
+            return instances[session_id]
+        else:
+            print("ERROR: Timeout esperando noVNC en puerto {}".format(novnc_port))
+            
+            # Mostrar logs de error
+            print("\nLogs de diagnostico:")
+            for log_file in ['xvfb.log', 'vnc.log', 'novnc.log']:
+                log_path = instance_path / log_file
+                if log_path.exists():
+                    print("\n--- {} ---".format(log_file))
+                    with open(log_path) as f:
+                        print(f.read())
+            
+            # Limpiar instancia fallida
+            instances[session_id]['status'] = 'error'
+            stop_instance(session_id)
+            return None
+            
     except Exception as e:
-        print(f"Error creando instancia: {e}")
+        print("ERROR creando instancia: {}".format(e))
+        import traceback
+        traceback.print_exc()
+        
+        if session_id in instances:
+            instances[session_id]['status'] = 'error'
+            stop_instance(session_id)
+        
         return None
 
 def stop_instance(session_id):
-    """Detiene una instancia específica"""
+    """Detiene una instancia especifica"""
     if session_id not in instances:
         return False
     
     instance = instances[session_id]
     instance_path = Path(INSTANCE_DIR) / instance['id']
     
+    print("\nDeteniendo instancia: {}".format(instance['id']))
+    
     try:
         # Leer PIDs y terminar procesos
-        for pid_file in ['app.pid', 'novnc.pid', 'vnc.pid', 'openbox.pid', 'xvfb.pid']:
+        pid_files = ['app.pid', 'novnc.pid', 'vnc.pid', 'openbox.pid', 'xvfb.pid']
+        for pid_file in pid_files:
             pid_path = instance_path / pid_file
             if pid_path.exists():
                 try:
                     with open(pid_path) as f:
                         pid = int(f.read().strip())
                     os.kill(pid, signal.SIGTERM)
-                except:
-                    pass
+                    print("   OK: Terminado proceso {}: PID {}".format(pid_file, pid))
+                except Exception as e:
+                    print("   WARN: Error terminando {}: {}".format(pid_file, e))
         
         # Terminar proceso principal
         if instance['process']:
-            instance['process'].terminate()
-            instance['process'].wait(timeout=5)
+            try:
+                instance['process'].terminate()
+                instance['process'].wait(timeout=5)
+                print("   OK: Proceso principal terminado")
+            except subprocess.TimeoutExpired:
+                instance['process'].kill()
+                print("   WARN: Proceso principal forzado (kill)")
         
         del instances[session_id]
+        print("OK: Instancia {} detenida correctamente".format(instance['id']))
         return True
+        
     except Exception as e:
-        print(f"Error deteniendo instancia: {e}")
+        print("ERROR deteniendo instancia: {}".format(e))
         return False
 
 def cleanup_inactive_instances():
@@ -122,15 +210,16 @@ def cleanup_inactive_instances():
     to_remove = []
     
     for session_id, instance in instances.items():
-        if current_time - instance['last_access'] > INSTANCE_TIMEOUT:
+        inactive_time = current_time - instance['last_access']
+        if inactive_time > INSTANCE_TIMEOUT:
             to_remove.append(session_id)
     
     for session_id in to_remove:
-        print(f"Limpiando instancia inactiva: {session_id}")
+        print("Limpiando instancia inactiva: {}".format(session_id))
         stop_instance(session_id)
 
 # HTML de la interfaz principal
-HTML_TEMPLATE = '''
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -305,13 +394,19 @@ HTML_TEMPLATE = '''
             padding: 20px;
             margin-bottom: 20px;
         }
+        
+        .loading-detail {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>🏦 SysBank Multi-Instancia</h1>
-            <p class="subtitle">Cada sesión es completamente independiente</p>
+            <h1>SysBank Multi-Instancia</h1>
+            <p class="subtitle">Cada sesion es completamente independiente</p>
         </header>
         
         <div class="stats">
@@ -321,11 +416,11 @@ HTML_TEMPLATE = '''
             </div>
             <div class="stat-card">
                 <div class="stat-value" id="max-instances">{{ max_instances }}</div>
-                <div class="stat-label">Máximo Permitido</div>
+                <div class="stat-label">Maximo Permitido</div>
             </div>
             <div class="stat-card">
                 <div class="stat-value" id="session-time">0:00</div>
-                <div class="stat-label">Tiempo de Sesión</div>
+                <div class="stat-label">Tiempo de Sesion</div>
             </div>
         </div>
         
@@ -334,151 +429,176 @@ HTML_TEMPLATE = '''
                 <div class="spinner"></div>
                 <h2>Iniciando tu instancia personal de SysBank...</h2>
                 <p>Esto puede tomar unos segundos</p>
+                <p class="loading-detail" id="loading-status">Preparando entorno...</p>
             </div>
         </div>
     </div>
     
     <script>
-        const sessionId = '{{ session_id }}';
-        let sessionStartTime = Date.now();
-        let statusCheckInterval;
+        var sessionId = '{{ session_id }}';
+        var sessionStartTime = Date.now();
+        var statusCheckInterval;
+        var checkAttempts = 0;
+        var maxAttempts = 30;
         
         function updateSessionTime() {
-            const elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
-            const minutes = Math.floor(elapsed / 60);
-            const seconds = elapsed % 60;
+            var elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
+            var minutes = Math.floor(elapsed / 60);
+            var seconds = elapsed % 60;
             document.getElementById('session-time').textContent = 
-                `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                minutes + ':' + (seconds < 10 ? '0' : '') + seconds;
         }
         
         function updateStats() {
             fetch('/api/stats')
-                .then(r => r.json())
-                .then(data => {
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
                     document.getElementById('active-instances').textContent = data.active_instances;
-                });
+                })
+                .catch(function(err) { console.error('Error updating stats:', err); });
+        }
+        
+        function updateLoadingStatus(message) {
+            var statusEl = document.getElementById('loading-status');
+            if (statusEl) {
+                statusEl.textContent = message;
+            }
         }
         
         function checkInstanceStatus() {
-            fetch(`/api/instance/${sessionId}`)
-                .then(r => r.json())
-                .then(data => {
+            checkAttempts++;
+            updateLoadingStatus('Verificando estado... (intento ' + checkAttempts + '/' + maxAttempts + ')');
+            
+            fetch('/api/instance/' + sessionId)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    console.log('Instance status:', data);
+                    
                     if (data.status === 'running') {
                         clearInterval(statusCheckInterval);
-                        loadVNC(data.novnc_port);
+                        updateLoadingStatus('Instancia lista! Cargando interfaz...');
+                        setTimeout(function() { loadVNC(data.novnc_port); }, 500);
                     } else if (data.status === 'error') {
-                        showError('Error al iniciar la instancia');
+                        clearInterval(statusCheckInterval);
+                        showError('Error al iniciar la instancia. Verifica los logs del contenedor con: docker logs -f sysbank_multi');
+                    } else if (data.status === 'starting') {
+                        if (checkAttempts >= maxAttempts) {
+                            clearInterval(statusCheckInterval);
+                            showError('Timeout: La instancia no inicio despues de ' + (maxAttempts * 2) + ' segundos. Verifica los logs.');
+                        }
                     }
                 })
-                .catch(err => {
+                .catch(function(err) {
                     console.error('Error checking status:', err);
+                    if (checkAttempts >= maxAttempts) {
+                        clearInterval(statusCheckInterval);
+                        showError('No se puede conectar con el servidor. Error: ' + err.message);
+                    }
                 });
         }
         
         function loadVNC(port) {
-            const content = document.getElementById('content');
-            content.innerHTML = `
-                <div class="vnc-container">
-                    <div class="vnc-header">
-                        <div class="session-info">
-                            <strong>Sesión:</strong> ${sessionId.substring(0, 8)} | 
-                            <strong>Puerto noVNC:</strong> ${port}
-                        </div>
-                        <div>
-                            <span class="status-badge">● Activa</span>
-                        </div>
-                    </div>
-                    <iframe 
-                        src="http://${window.location.hostname}:${port}/vnc.html?autoconnect=true&reconnect=true"
-                        onerror="handleIframeError()"
-                        onload="console.log('noVNC cargado en puerto ${port}')">
-                    </iframe>
-                </div>
-                <div class="controls">
-                    <button class="btn-info" onclick="testConnection(${port})">
-                        🔍 Probar Conexión
-                    </button>
-                    <button class="btn-info" onclick="location.reload()">
-                        🔄 Recargar Sesión
-                    </button>
-                    <button class="btn-danger" onclick="terminateSession()">
-                        ✕ Terminar Sesión
-                    </button>
-                    <button class="btn-primary" onclick="window.open('/', '_blank')">
-                        ➕ Nueva Instancia
-                    </button>
-                </div>
-            `;
+            var content = document.getElementById('content');
+            content.innerHTML = '<div class="vnc-container">' +
+                '<div class="vnc-header">' +
+                    '<div class="session-info">' +
+                        '<strong>Sesion:</strong> ' + sessionId.substring(0, 8) + ' | ' +
+                        '<strong>Puerto noVNC:</strong> ' + port +
+                    '</div>' +
+                    '<div>' +
+                        '<span class="status-badge">Activa</span>' +
+                    '</div>' +
+                '</div>' +
+                '<iframe src="http://' + window.location.hostname + ':' + port + '/vnc.html?autoconnect=true&reconnect=true"></iframe>' +
+                '</div>' +
+                '<div class="controls">' +
+                    '<button class="btn-info" onclick="testConnection(' + port + ')">Probar Conexion</button>' +
+                    '<button class="btn-info" onclick="location.reload()">Recargar Sesion</button>' +
+                    '<button class="btn-danger" onclick="terminateSession()">Terminar Sesion</button>' +
+                    '<button class="btn-primary" onclick="openNewInstance()">Nueva Instancia</button>' +
+                '</div>';
+        }
+        
+        function openNewInstance() {
+            window.open('/', '_blank');
         }
         
         function testConnection(port) {
-            const url = `http://${window.location.hostname}:${port}/vnc.html`;
-            console.log('Probando conexión a:', url);
+            var url = 'http://' + window.location.hostname + ':' + port + '/vnc.html';
+            console.log('Probando conexion a:', url);
             fetch(url)
-                .then(r => {
+                .then(function(r) {
                     if (r.ok) {
-                        alert('✓ Conexión OK - noVNC responde correctamente');
+                        alert('Conexion OK - noVNC responde correctamente');
                     } else {
-                        alert('✗ Error: noVNC responde pero con código ' + r.status);
+                        alert('Error: noVNC responde pero con codigo ' + r.status);
                     }
                 })
-                .catch(err => {
-                    alert('✗ Error de conexión: ' + err.message + '\n\nPuerto: ' + port);
+                .catch(function(err) {
+                    alert('Error de conexion: ' + err.message + '\\n\\nPuerto: ' + port);
                     console.error('Error:', err);
                 });
         }
         
-        function handleIframeError() {
-            console.error('Error cargando iframe de noVNC');
-            showError('No se puede cargar la interfaz noVNC. Verifica los logs del contenedor.');
+        function showError(message) {
+            var content = document.getElementById('content');
+            content.innerHTML = '<div class="error">' +
+                '<h2>Error</h2>' +
+                '<p>' + message + '</p>' +
+                '<button class="btn-primary" onclick="location.reload()">Reintentar</button>' +
+                '<button class="btn-info" onclick="openInstancesPage()">Ver Instancias Activas</button>' +
+                '</div>';
         }
         
-        function showError(message) {
-            const content = document.getElementById('content');
-            content.innerHTML = `
-                <div class="error">
-                    <h2>❌ Error</h2>
-                    <p>${message}</p>
-                    <button class="btn-primary" onclick="location.reload()">
-                        Reintentar
-                    </button>
-                </div>
-            `;
+        function openInstancesPage() {
+            window.open('/api/instances', '_blank');
         }
         
         function terminateSession() {
-            if (confirm('¿Estás seguro de que quieres terminar esta sesión?')) {
-                fetch(`/api/instance/${sessionId}`, { method: 'DELETE' })
-                    .then(() => {
+            if (confirm('Estas seguro de que quieres terminar esta sesion?')) {
+                fetch('/api/instance/' + sessionId, { method: 'DELETE' })
+                    .then(function() {
+                        alert('Sesion terminada');
                         window.close();
                     });
             }
         }
         
-        // Iniciar
+        // Iniciar verificacion de estado cada 2 segundos
         statusCheckInterval = setInterval(checkInstanceStatus, 2000);
         checkInstanceStatus();
         
         // Actualizar stats y tiempo cada segundo
-        setInterval(() => {
+        setInterval(function() {
             updateStats();
             updateSessionTime();
         }, 1000);
         
         updateStats();
         
-        // Heartbeat para mantener la sesión activa
-        setInterval(() => {
-            fetch(`/api/instance/${sessionId}/heartbeat`, { method: 'POST' });
+        // Heartbeat para mantener la sesion activa
+        setInterval(function() {
+            fetch('/api/instance/' + sessionId + '/heartbeat', { method: 'POST' })
+                .then(function(r) {
+                    if (r.status === 404) {
+                        console.warn('Sesion no encontrada en el servidor');
+                        var statusBadge = document.querySelector('.status-badge');
+                        if (statusBadge) {
+                            statusBadge.style.background = '#f44336';
+                            statusBadge.textContent = 'Desconectado';
+                        }
+                    }
+                })
+                .catch(function(err) { console.error('Error en heartbeat:', err); });
         }, 30000);
     </script>
 </body>
 </html>
-'''
+"""
 
 @app.route('/')
 def index():
-    """Página principal - crea nueva instancia para cada visitante"""
+    """Pagina principal - crea nueva instancia para cada visitante"""
     session_id = str(uuid.uuid4())
     
     # Limpiar instancias inactivas
@@ -488,7 +608,7 @@ def index():
     instance = create_instance(session_id)
     
     if instance is None:
-        return "Error: No se pueden crear más instancias. Intenta más tarde.", 503
+        return "Error: No se pueden crear mas instancias. Verifica los logs: docker logs -f sysbank_multi", 503
     
     return render_template_string(HTML_TEMPLATE, 
                                  session_id=session_id, 
@@ -496,7 +616,7 @@ def index():
 
 @app.route('/api/stats')
 def stats():
-    """Estadísticas del sistema"""
+    """Estadisticas del sistema"""
     return jsonify({
         'active_instances': len(instances),
         'max_instances': MAX_INSTANCES,
@@ -505,7 +625,7 @@ def stats():
 
 @app.route('/api/instance/<session_id>')
 def get_instance(session_id):
-    """Obtiene información de una instancia"""
+    """Obtiene informacion de una instancia"""
     if session_id in instances:
         instance = instances[session_id]
         instance['last_access'] = time.time()
@@ -519,7 +639,7 @@ def get_instance(session_id):
 
 @app.route('/api/instance/<session_id>/heartbeat', methods=['POST'])
 def heartbeat(session_id):
-    """Actualiza el último acceso de una instancia"""
+    """Actualiza el ultimo acceso de una instancia"""
     if session_id in instances:
         instances[session_id]['last_access'] = time.time()
         return jsonify({'status': 'ok'})
@@ -527,7 +647,7 @@ def heartbeat(session_id):
 
 @app.route('/api/instance/<session_id>', methods=['DELETE'])
 def delete_instance(session_id):
-    """Elimina una instancia específica"""
+    """Elimina una instancia especifica"""
     if stop_instance(session_id):
         return jsonify({'status': 'deleted'})
     return jsonify({'status': 'error'}), 500
@@ -540,12 +660,13 @@ def list_instances():
             'id': session_id,
             'status': inst['status'],
             'created_at': inst['created_at'],
-            'last_access': inst['last_access']
+            'last_access': inst['last_access'],
+            'novnc_port': inst['novnc_port']
         } for session_id, inst in instances.items()]
     })
 
 if __name__ == '__main__':
-    # Limpiar instancias antiguas al iniciar (solo archivos, no el directorio)
+    # Limpiar instancias antiguas al iniciar
     if os.path.exists(INSTANCE_DIR):
         import shutil
         for item in os.listdir(INSTANCE_DIR):
@@ -556,14 +677,17 @@ if __name__ == '__main__':
                 elif os.path.isdir(item_path):
                     shutil.rmtree(item_path)
             except Exception as e:
-                print(f"Error limpiando {item_path}: {e}")
+                print("Error limpiando {}: {}".format(item_path, e))
     
     os.makedirs(INSTANCE_DIR, exist_ok=True)
     
-    print("=" * 50)
+    print("=" * 60)
     print("SysBank Multi-Instancia iniciado")
+    print("=" * 60)
     print("Accede en: http://localhost:8080")
-    print("=" * 50)
+    print("Maximo de instancias: {}".format(MAX_INSTANCES))
+    print("Timeout de inactividad: {}s".format(INSTANCE_TIMEOUT))
+    print("=" * 60)
     
     # Iniciar servidor
-    app.run(host='0.0.0.0', port=8080, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=8080, debug=True, threaded=True)
