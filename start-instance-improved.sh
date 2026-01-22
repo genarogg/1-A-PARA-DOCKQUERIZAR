@@ -17,7 +17,7 @@ export DISPLAY=:$DISPLAY_NUM
 INSTANCE_DIR="/app/instances/$INSTANCE_ID"
 
 echo "========================================="
-echo "Iniciando instancia optimizada: $INSTANCE_ID"
+echo "Iniciando instancia mejorada: $INSTANCE_ID"
 echo "Display: $DISPLAY"
 echo "VNC Port: $VNC_PORT"
 echo "noVNC Port: $NOVNC_PORT"
@@ -34,17 +34,17 @@ export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
 export LP_NUM_THREADS=4
 
-# [1/5] Iniciar Xvfb con configuración optimizada para mejor calidad
-echo "[1/5] Iniciando servidor X optimizado..."
+# [1/6] Iniciar Xvfb con configuración optimizada
+echo "[1/6] Iniciando servidor X optimizado..."
 Xvfb $DISPLAY \
     -screen 0 ${RESOLUTION:-1920x1080x24} \
     -ac \
     +extension GLX \
     +extension RANDR \
     +extension RENDER \
-    +extension COMPOSITE \
     -noreset \
     -dpi 96 \
+    -nolisten tcp \
     > "$INSTANCE_DIR/xvfb.log" 2>&1 &
 XVFB_PID=$!
 echo $XVFB_PID > "$INSTANCE_DIR/xvfb.pid"
@@ -65,77 +65,50 @@ for i in {1..30}; do
     sleep 1
 done
 
-# [2/5] Iniciar gestor de ventanas (intentar XFCE, fallback a Openbox)
-echo "[2/5] Iniciando gestor de ventanas..."
-if command -v startxfce4 >/dev/null 2>&1; then
-    echo "Usando XFCE4 para mejor experiencia visual"
-    DISPLAY=$DISPLAY startxfce4 > "$INSTANCE_DIR/wm.log" 2>&1 &
-    WM_PID=$!
-    sleep 3
-elif command -v xfce4-session >/dev/null 2>&1; then
-    echo "Usando XFCE4 session"
-    DISPLAY=$DISPLAY xfce4-session > "$INSTANCE_DIR/wm.log" 2>&1 &
-    WM_PID=$!
-    sleep 3
-else
-    echo "Usando Openbox (XFCE no disponible)"
-    DISPLAY=$DISPLAY openbox --config-file /dev/null > "$INSTANCE_DIR/wm.log" 2>&1 &
-    WM_PID=$!
-    sleep 1
-fi
-echo $WM_PID > "$INSTANCE_DIR/wm.pid"
-echo "Window Manager PID: $WM_PID"
+# [2/6] Iniciar D-Bus (necesario para XFCE)
+echo "[2/6] Iniciando D-Bus..."
+dbus-daemon --session --fork --print-address > "$INSTANCE_DIR/dbus.address"
+export DBUS_SESSION_BUS_ADDRESS=$(cat "$INSTANCE_DIR/dbus.address")
 
-# [3/5] Iniciar compositor si está disponible (para efectos visuales suaves)
-if command -v picom >/dev/null 2>&1; then
-    echo "[3/5] Iniciando compositor Picom para efectos visuales..."
-    DISPLAY=$DISPLAY picom \
-        --backend glx \
-        --vsync \
-        --fade-in-step=0.03 \
-        --fade-out-step=0.03 \
-        --shadow \
-        --shadow-opacity=0.5 \
-        > "$INSTANCE_DIR/picom.log" 2>&1 &
-    PICOM_PID=$!
-    echo $PICOM_PID > "$INSTANCE_DIR/picom.pid"
-    echo "Picom PID: $PICOM_PID"
-    sleep 1
-elif command -v compton >/dev/null 2>&1; then
-    echo "[3/5] Iniciando compositor Compton..."
-    DISPLAY=$DISPLAY compton -b > "$INSTANCE_DIR/compton.log" 2>&1 &
-    echo "Compositor iniciado"
-else
-    echo "[3/5] Compositor no disponible (continuando sin efectos)"
-fi
+# [3/6] Iniciar XFCE4 (gestor de ventanas completo)
+echo "[3/6] Iniciando entorno XFCE4..."
+DISPLAY=$DISPLAY startxfce4 > "$INSTANCE_DIR/xfce4.log" 2>&1 &
+XFCE_PID=$!
+echo $XFCE_PID > "$INSTANCE_DIR/xfce4.pid"
+echo "XFCE4 PID: $XFCE_PID"
+sleep 3
 
-# [4/5] Iniciar servidor VNC (intentar TigerVNC, fallback a x11vnc)
-echo "[4/5] Iniciando servidor VNC optimizado..."
-if command -v x0vncserver >/dev/null 2>&1; then
-    echo "Usando TigerVNC para mejor calidad"
-    x0vncserver \
-        -display $DISPLAY \
-        -rfbport $VNC_PORT \
-        -SecurityTypes None \
-        -AlwaysShared \
-        > "$INSTANCE_DIR/vnc.log" 2>&1 &
-    VNC_PID=$!
-else
-    echo "Usando x11vnc"
-    x11vnc \
-        -display $DISPLAY \
-        -rfbport $VNC_PORT \
-        -nopw \
-        -listen 0.0.0.0 \
-        -xkb \
-        -forever \
-        -shared \
-        -threads \
-        > "$INSTANCE_DIR/vnc.log" 2>&1 &
-    VNC_PID=$!
-fi
+# [4/6] Iniciar compositor Picom para efectos visuales suaves
+echo "[4/6] Iniciando compositor Picom..."
+DISPLAY=$DISPLAY picom \
+    --backend glx \
+    --vsync \
+    --fade-in-step=0.03 \
+    --fade-out-step=0.03 \
+    --shadow \
+    --shadow-opacity=0.5 \
+    > "$INSTANCE_DIR/picom.log" 2>&1 &
+PICOM_PID=$!
+echo $PICOM_PID > "$INSTANCE_DIR/picom.pid"
+echo "Picom PID: $PICOM_PID"
+sleep 1
+
+# [5/6] Iniciar servidor TigerVNC optimizado
+echo "[5/6] Iniciando servidor TigerVNC..."
+x0vncserver \
+    -display $DISPLAY \
+    -rfbport $VNC_PORT \
+    -SecurityTypes None \
+    -AlwaysShared \
+    -AcceptPointerEvents \
+    -AcceptKeyEvents \
+    -AcceptCutText \
+    -SendCutText \
+    -MaxCutText=1000000 \
+    > "$INSTANCE_DIR/vnc.log" 2>&1 &
+VNC_PID=$!
 echo $VNC_PID > "$INSTANCE_DIR/vnc.pid"
-echo "VNC PID: $VNC_PID"
+echo "TigerVNC PID: $VNC_PID"
 
 # Esperar a que VNC esté listo
 echo "Esperando a que VNC este listo..."
@@ -152,8 +125,8 @@ for i in {1..30}; do
     sleep 1
 done
 
-# [5/5] Iniciar noVNC
-echo "[5/5] Iniciando noVNC..."
+# [6/6] Iniciar noVNC
+echo "[6/6] Iniciando noVNC..."
 /opt/novnc/utils/novnc_proxy \
     --vnc localhost:$VNC_PORT \
     --listen $NOVNC_PORT \
@@ -172,8 +145,8 @@ else
     cat "$INSTANCE_DIR/novnc.log"
 fi
 
-# [6/6] Iniciar aplicación SysBank
-echo "[6/6] Iniciando aplicacion SysBank..."
+# [7/7] Iniciar aplicación SysBank
+echo "[7/7] Iniciando aplicacion SysBank..."
 DISPLAY=$DISPLAY /app/sysbank > "$INSTANCE_DIR/sysbank.log" 2>&1 &
 APP_PID=$!
 echo $APP_PID > "$INSTANCE_DIR/app.pid"
@@ -182,8 +155,21 @@ echo "SysBank PID: $APP_PID"
 echo "========================================="
 echo "Instancia $INSTANCE_ID iniciada correctamente"
 echo "========================================="
-echo "PIDs guardados en: $INSTANCE_DIR"
-echo "Logs disponibles en: $INSTANCE_DIR/*.log"
+echo "PIDs:"
+echo "  Xvfb: $XVFB_PID"
+echo "  XFCE4: $XFCE_PID"
+echo "  Picom: $PICOM_PID"
+echo "  TigerVNC: $VNC_PID"
+echo "  noVNC: $NOVNC_PID"
+echo "  SysBank: $APP_PID"
+echo "========================================="
+echo "Logs disponibles en: $INSTANCE_DIR/"
+echo "  - xvfb.log"
+echo "  - xfce4.log"
+echo "  - picom.log"
+echo "  - vnc.log"
+echo "  - novnc.log"
+echo "  - sysbank.log"
 echo "========================================="
 
 # Mantener el script corriendo y monitorear procesos críticos
