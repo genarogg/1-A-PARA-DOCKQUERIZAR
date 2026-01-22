@@ -1,17 +1,26 @@
-version: '3.8'
-
 services:
-  sysbank:
+  sysbank-multi:
     build: .
-    image: sysbank:qt4-vnc
-    container_name: sysbank_vnc
+    image: sysbank:qt4-multi
+    container_name: sysbank_multi
     ports:
-      - "6080:6080"  # noVNC (navegador web)
-      - "5900:5900"  # VNC directo
+      - "8080:8080"           # Gestor de instancias
+      - "5900-5950:5900-5950" # Rango de puertos VNC (50 instancias)
+      - "6080-6130:6080-6130" # Rango de puertos noVNC (50 instancias)
     environment:
-      - RESOLUTION=1280x720x24
+      - RESOLUTION=1920x1080x24
       - QT_X11_NO_MITSHM=1
+      - QT_GRAPHICSSYSTEM=native
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - GALLIUM_DRIVER=llvmpipe
     volumes:
-      - .:/app/data
+      - sysbank_data:/app/data
+      - sysbank_instances:/app/instances
     restart: unless-stopped
-    shm_size: '2gb'  # Memoria compartida para mejor rendimiento
+    shm_size: '4gb'
+
+volumes:
+  sysbank_data:
+    driver: local
+  sysbank_instances:
+    driver: local
