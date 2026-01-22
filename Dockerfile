@@ -1,14 +1,12 @@
 FROM debian:buster
 
-# Debian 10 (Buster) ha sido movido a archive.debian.org.
-# Necesitamos reconfigurar sources.list para apuntar a archive tanto para Buster como para Stretch (QT4).
+# Configurar repositorios archivados
 RUN echo "deb http://archive.debian.org/debian buster main contrib non-free" > /etc/apt/sources.list && \
     echo "deb http://archive.debian.org/debian-security buster/updates main" >> /etc/apt/sources.list && \
     echo "deb http://archive.debian.org/debian stretch main contrib non-free" >> /etc/apt/sources.list && \
-    # Desactivar validación de tiempo para repositorios archivados
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
 
-# Instalamos las dependencias
+# Instalar dependencias Qt4, VNC, noVNC y servidor X virtual
 RUN apt-get -o Acquire::AllowInsecureRepositories=true \
             -o Acquire::AllowDowngradeToInsecureRepositories=true \
             update && \
@@ -22,15 +20,34 @@ RUN apt-get -o Acquire::AllowInsecureRepositories=true \
     libqt4-sql-psql \
     libqtcore4 \
     libqt4-xml \
-    x11-apps \
+    xvfb \
+    x11vnc \
+    fluxbox \
+    wget \
+    python3 \
+    python3-numpy \
+    git \
+    net-tools \
     && rm -rf /var/lib/apt/lists/*
+
+# Instalar noVNC
+RUN git clone https://github.com/novnc/noVNC.git /opt/novnc && \
+    git clone https://github.com/novnc/websockify /opt/novnc/utils/websockify && \
+    ln -s /opt/novnc/vnc.html /opt/novnc/index.html
 
 WORKDIR /app
 
 COPY sysbank /app/sysbank
-
 RUN chmod +x /app/sysbank
 
-ENV QT_X11_NO_MITSHM=1
+# Variables de entorno
+ENV DISPLAY=:99
+ENV RESOLUTION=1280x720x24
 
-CMD ["./sysbank"]
+# Copiar script de inicio
+COPY start-vnc.sh /app/start-vnc.sh
+RUN chmod +x /app/start-vnc.sh
+
+EXPOSE 5900 6080
+
+CMD ["/app/start-vnc.sh"]
