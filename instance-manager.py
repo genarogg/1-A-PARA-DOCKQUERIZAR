@@ -1,204 +1,658 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Gestor de instancias multi-sesion para SysBank
+Cada navegador obtiene su propia instancia aislada
+"""
 
-# Parámetros de la instancia
-INSTANCE_ID=$1
-DISPLAY_NUM=$2
-VNC_PORT=$3
-NOVNC_PORT=$4
+from flask import Flask, render_template_string, jsonify, request, redirect
+from flask_cors import CORS
+import subprocess
+import os
+import time
+import uuid
+import signal
+import json
+import socket
+from pathlib import Path
 
-if [ -z "$INSTANCE_ID" ] || [ -z "$DISPLAY_NUM" ] || [ -z "$VNC_PORT" ] || [ -z "$NOVNC_PORT" ]; then
-    echo "Error: Faltan parametros"
-    echo "Uso: $0 <instance_id> <display_num> <vnc_port> <novnc_port>"
-    exit 1
-fi
+app = Flask(__name__)
+CORS(app)
 
-export DISPLAY=:$DISPLAY_NUM
-INSTANCE_DIR="/app/instances/$INSTANCE_ID"
+# Configuracion
+BASE_DISPLAY = 99
+BASE_VNC_PORT = 5900
+BASE_NOVNC_PORT = 6080
+MAX_INSTANCES = 50
+INSTANCE_DIR = "/app/instances"
+INSTANCE_TIMEOUT = 3600  # 1 hora de inactividad
 
-echo "========================================="
-echo "Iniciando instancia optimizada: $INSTANCE_ID"
-echo "Display: $DISPLAY"
-echo "VNC Port: $VNC_PORT"
-echo "noVNC Port: $NOVNC_PORT"
-echo "========================================="
+# Almacenamiento de instancias activas
+instances = {}
 
-# Crear directorio de la instancia
-mkdir -p "$INSTANCE_DIR"
-cd "$INSTANCE_DIR"
+def check_port_open(host, port, timeout=1):
+    """Verifica si un puerto esta abierto"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except:
+        return False
 
-# Configurar variables de entorno para mejor rendimiento gráfico
-export MESA_GL_VERSION_OVERRIDE=3.3
-export MESA_GLSL_VERSION_OVERRIDE=330
-export LIBGL_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER=llvmpipe
-export LP_NUM_THREADS=4
+def get_next_available_ports():
+    """Encuentra los siguientes puertos disponibles"""
+    used_displays = [inst['display'] for inst in instances.values()]
+    used_vnc_ports = [inst['vnc_port'] for inst in instances.values()]
+    used_novnc_ports = [inst['novnc_port'] for inst in instances.values()]
+    
+    for i in range(MAX_INSTANCES):
+        display = BASE_DISPLAY + i
+        vnc_port = BASE_VNC_PORT + i
+        novnc_port = BASE_NOVNC_PORT + i
+        
+        if display not in used_displays and vnc_port not in used_vnc_ports and novnc_port not in used_novnc_ports:
+            return display, vnc_port, novnc_port
+    
+    return None, None, None
 
-# [1/5] Iniciar Xvfb con configuración optimizada para mejor calidad
-echo "[1/5] Iniciando servidor X optimizado..."
-Xvfb $DISPLAY \
-    -screen 0 ${RESOLUTION:-1920x1080x24} \
-    -ac \
-    +extension GLX \
-    +extension RANDR \
-    +extension RENDER \
-    +extension COMPOSITE \
-    -noreset \
-    -dpi 96 \
-    > "$INSTANCE_DIR/xvfb.log" 2>&1 &
-XVFB_PID=$!
-echo $XVFB_PID > "$INSTANCE_DIR/xvfb.pid"
-echo "Xvfb PID: $XVFB_PID"
+def wait_for_port(port, timeout=30, check_interval=0.5):
+    """Espera a que un puerto este disponible"""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if check_port_open('localhost', port):
+            return True
+        time.sleep(check_interval)
+    return False
 
-# Esperar a que X esté listo
-echo "Esperando a que X este listo..."
-for i in {1..30}; do
-    if DISPLAY=$DISPLAY xdpyinfo >/dev/null 2>&1; then
-        echo "OK - Servidor X listo despues de $i intentos"
-        break
-    fi
-    if [ $i -eq 30 ]; then
-        echo "ERROR: Servidor X no responde despues de 30 segundos"
-        cat "$INSTANCE_DIR/xvfb.log"
-        exit 1
-    fi
-    sleep 1
-done
+def create_instance(session_id):
+    """Crea una nueva instancia de SysBank"""
+    if len(instances) >= MAX_INSTANCES:
+        print("ERROR: Limite de instancias alcanzado: {}/{}".format(len(instances), MAX_INSTANCES))
+        return None
+    
+    display, vnc_port, novnc_port = get_next_available_ports()
+    if display is None:
+        print("ERROR: No hay puertos disponibles")
+        return None
+    
+    instance_id = "sysbank_{}".format(session_id)
+    instance_path = Path(INSTANCE_DIR) / instance_id
+    
+    print("\n" + "="*60)
+    print("Creando instancia: {}".format(instance_id))
+    print("   Display: :{}".format(display))
+    print("   VNC Port: {}".format(vnc_port))
+    print("   noVNC Port: {}".format(novnc_port))
+    print("="*60)
+    
+    try:
+        # Crear directorio de la instancia
+        instance_path.mkdir(parents=True, exist_ok=True)
+        
+        # Iniciar la instancia
+        process = subprocess.Popen([
+            '/app/start-instance.sh',
+            instance_id,
+            str(display),
+            str(vnc_port),
+            str(novnc_port)
+        ], 
+        stdout=subprocess.PIPE, 
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1)
+        
+        # Registrar instancia inmediatamente
+        instances[session_id] = {
+            'id': instance_id,
+            'display': display,
+            'vnc_port': vnc_port,
+            'novnc_port': novnc_port,
+            'process': process,
+            'created_at': time.time(),
+            'last_access': time.time(),
+            'status': 'starting'
+        }
+        
+        # Esperar a que noVNC este disponible
+        print("Esperando a que noVNC este disponible en puerto {}...".format(novnc_port))
+        if wait_for_port(novnc_port, timeout=30):
+            print("OK: noVNC listo en puerto {}".format(novnc_port))
+            instances[session_id]['status'] = 'running'
+            
+            # Mostrar logs de inicio
+            log_files = ['xvfb.log', 'vnc.log', 'novnc.log', 'sysbank.log']
+            for log_file in log_files:
+                log_path = instance_path / log_file
+                if log_path.exists():
+                    print("\nLOG {}:".format(log_file))
+                    with open(log_path) as f:
+                        lines = f.readlines()
+                        for line in lines[-5:]:  # Ultimas 5 lineas
+                            print("   {}".format(line.rstrip()))
+            
+            return instances[session_id]
+        else:
+            print("ERROR: Timeout esperando noVNC en puerto {}".format(novnc_port))
+            
+            # Mostrar logs de error
+            print("\nLogs de diagnostico:")
+            for log_file in ['xvfb.log', 'vnc.log', 'novnc.log']:
+                log_path = instance_path / log_file
+                if log_path.exists():
+                    print("\n--- {} ---".format(log_file))
+                    with open(log_path) as f:
+                        print(f.read())
+            
+            # Limpiar instancia fallida
+            instances[session_id]['status'] = 'error'
+            stop_instance(session_id)
+            return None
+            
+    except Exception as e:
+        print("ERROR creando instancia: {}".format(e))
+        import traceback
+        traceback.print_exc()
+        
+        if session_id in instances:
+            instances[session_id]['status'] = 'error'
+            stop_instance(session_id)
+        
+        return None
 
-# [2/5] Iniciar gestor de ventanas (intentar XFCE, fallback a Openbox)
-echo "[2/5] Iniciando gestor de ventanas..."
-if command -v startxfce4 >/dev/null 2>&1; then
-    echo "Usando XFCE4 para mejor experiencia visual"
-    DISPLAY=$DISPLAY startxfce4 > "$INSTANCE_DIR/wm.log" 2>&1 &
-    WM_PID=$!
-    sleep 3
-elif command -v xfce4-session >/dev/null 2>&1; then
-    echo "Usando XFCE4 session"
-    DISPLAY=$DISPLAY xfce4-session > "$INSTANCE_DIR/wm.log" 2>&1 &
-    WM_PID=$!
-    sleep 3
-else
-    echo "Usando Openbox (XFCE no disponible)"
-    DISPLAY=$DISPLAY openbox --config-file /dev/null > "$INSTANCE_DIR/wm.log" 2>&1 &
-    WM_PID=$!
-    sleep 1
-fi
-echo $WM_PID > "$INSTANCE_DIR/wm.pid"
-echo "Window Manager PID: $WM_PID"
+def stop_instance(session_id):
+    """Detiene una instancia especifica"""
+    if session_id not in instances:
+        return False
+    
+    instance = instances[session_id]
+    instance_path = Path(INSTANCE_DIR) / instance['id']
+    
+    print("\nDeteniendo instancia: {}".format(instance['id']))
+    
+    try:
+        # Leer PIDs y terminar procesos
+        pid_files = ['app.pid', 'novnc.pid', 'vnc.pid', 'wm.pid', 'xvfb.pid']
+        for pid_file in pid_files:
+            pid_path = instance_path / pid_file
+            if pid_path.exists():
+                try:
+                    with open(pid_path) as f:
+                        pid = int(f.read().strip())
+                    os.kill(pid, signal.SIGTERM)
+                    print("   OK: Terminado proceso {}: PID {}".format(pid_file, pid))
+                except Exception as e:
+                    print("   WARN: Error terminando {}: {}".format(pid_file, e))
+        
+        # Terminar proceso principal
+        if instance['process']:
+            try:
+                instance['process'].terminate()
+                instance['process'].wait(timeout=5)
+                print("   OK: Proceso principal terminado")
+            except subprocess.TimeoutExpired:
+                instance['process'].kill()
+                print("   WARN: Proceso principal forzado (kill)")
+        
+        del instances[session_id]
+        print("OK: Instancia {} detenida correctamente".format(instance['id']))
+        return True
+        
+    except Exception as e:
+        print("ERROR deteniendo instancia: {}".format(e))
+        return False
 
-# [3/5] Iniciar compositor si está disponible (para efectos visuales suaves)
-if command -v picom >/dev/null 2>&1; then
-    echo "[3/5] Iniciando compositor Picom para efectos visuales..."
-    DISPLAY=$DISPLAY picom \
-        --backend glx \
-        --vsync \
-        --fade-in-step=0.03 \
-        --fade-out-step=0.03 \
-        --shadow \
-        --shadow-opacity=0.5 \
-        > "$INSTANCE_DIR/picom.log" 2>&1 &
-    PICOM_PID=$!
-    echo $PICOM_PID > "$INSTANCE_DIR/picom.pid"
-    echo "Picom PID: $PICOM_PID"
-    sleep 1
-elif command -v compton >/dev/null 2>&1; then
-    echo "[3/5] Iniciando compositor Compton..."
-    DISPLAY=$DISPLAY compton -b > "$INSTANCE_DIR/compton.log" 2>&1 &
-    echo "Compositor iniciado"
-else
-    echo "[3/5] Compositor no disponible (continuando sin efectos)"
-fi
+def cleanup_inactive_instances():
+    """Limpia instancias inactivas"""
+    current_time = time.time()
+    to_remove = []
+    
+    for session_id, instance in instances.items():
+        inactive_time = current_time - instance['last_access']
+        if inactive_time > INSTANCE_TIMEOUT:
+            to_remove.append(session_id)
+    
+    for session_id in to_remove:
+        print("Limpiando instancia inactiva: {}".format(session_id))
+        stop_instance(session_id)
 
-# [4/5] Iniciar servidor VNC (intentar TigerVNC, fallback a x11vnc)
-echo "[4/5] Iniciando servidor VNC optimizado..."
-if command -v x0vncserver >/dev/null 2>&1; then
-    echo "Usando TigerVNC para mejor calidad"
-    x0vncserver \
-        -display $DISPLAY \
-        -rfbport $VNC_PORT \
-        -SecurityTypes None \
-        -AlwaysShared \
-        > "$INSTANCE_DIR/vnc.log" 2>&1 &
-    VNC_PID=$!
-else
-    echo "Usando x11vnc"
-    x11vnc \
-        -display $DISPLAY \
-        -rfbport $VNC_PORT \
-        -nopw \
-        -listen 0.0.0.0 \
-        -xkb \
-        -forever \
-        -shared \
-        -threads \
-        > "$INSTANCE_DIR/vnc.log" 2>&1 &
-    VNC_PID=$!
-fi
-echo $VNC_PID > "$INSTANCE_DIR/vnc.pid"
-echo "VNC PID: $VNC_PID"
+# HTML de la interfaz principal
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SysBank - Sistema Multi-Instancia</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+        
+        .vnc-container {
+            background: white;
+            border-radius: 15px;
+            padding: 0;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .vnc-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .session-info {
+            font-size: 0.9em;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            background: #4CAF50;
+            border-radius: 20px;
+            font-size: 0.85em;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 100px 20px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .spinner {
+            width: 60px;
+            height: 60px;
+            border: 5px solid rgba(255,255,255,0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        iframe {
+            width: 100%;
+            height: calc(100vh - 300px);
+            min-height: 600px;
+            border: none;
+            display: block;
+        }
+        
+        .controls {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        
+        .btn-primary {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+        
+        .btn-info {
+            background: #2196F3;
+            color: white;
+        }
+        
+        .error {
+            background: rgba(244, 67, 54, 0.2);
+            border: 1px solid #f44336;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .loading-detail {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>SysBank Multi-Instancia HD</h1>
+            <p class="subtitle">Experiencia grafica mejorada - Cada sesion es independiente</p>
+        </header>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="active-instances">-</div>
+                <div class="stat-label">Instancias Activas</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="max-instances">{{ max_instances }}</div>
+                <div class="stat-label">Maximo Permitido</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="session-time">0:00</div>
+                <div class="stat-label">Tiempo de Sesion</div>
+            </div>
+        </div>
+        
+        <div id="content">
+            <div class="loading">
+                <div class="spinner"></div>
+                <h2>Iniciando tu instancia HD de SysBank...</h2>
+                <p>Esto puede tomar unos segundos</p>
+                <p class="loading-detail" id="loading-status">Preparando entorno grafico...</p>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        var sessionId = '{{ session_id }}';
+        var sessionStartTime = Date.now();
+        var statusCheckInterval;
+        var checkAttempts = 0;
+        var maxAttempts = 30;
+        
+        function updateSessionTime() {
+            var elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
+            var minutes = Math.floor(elapsed / 60);
+            var seconds = elapsed % 60;
+            document.getElementById('session-time').textContent = 
+                minutes + ':' + (seconds < 10 ? '0' : '') + seconds;
+        }
+        
+        function updateStats() {
+            fetch('/api/stats')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    document.getElementById('active-instances').textContent = data.active_instances;
+                })
+                .catch(function(err) { console.error('Error updating stats:', err); });
+        }
+        
+        function updateLoadingStatus(message) {
+            var statusEl = document.getElementById('loading-status');
+            if (statusEl) {
+                statusEl.textContent = message;
+            }
+        }
+        
+        function checkInstanceStatus() {
+            checkAttempts++;
+            updateLoadingStatus('Verificando estado... (intento ' + checkAttempts + '/' + maxAttempts + ')');
+            
+            fetch('/api/instance/' + sessionId)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    console.log('Instance status:', data);
+                    
+                    if (data.status === 'running') {
+                        clearInterval(statusCheckInterval);
+                        updateLoadingStatus('Instancia lista! Cargando interfaz HD...');
+                        setTimeout(function() { loadVNC(data.novnc_port); }, 500);
+                    } else if (data.status === 'error') {
+                        clearInterval(statusCheckInterval);
+                        showError('Error al iniciar la instancia. Verifica los logs: docker logs -f sysbank_multi');
+                    } else if (data.status === 'starting') {
+                        if (checkAttempts >= maxAttempts) {
+                            clearInterval(statusCheckInterval);
+                            showError('Timeout: La instancia no inicio despues de ' + (maxAttempts * 2) + ' segundos.');
+                        }
+                    }
+                })
+                .catch(function(err) {
+                    console.error('Error checking status:', err);
+                    if (checkAttempts >= maxAttempts) {
+                        clearInterval(statusCheckInterval);
+                        showError('No se puede conectar con el servidor. Error: ' + err.message);
+                    }
+                });
+        }
+        
+        function loadVNC(port) {
+            var content = document.getElementById('content');
+            content.innerHTML = '<div class="vnc-container">' +
+                '<div class="vnc-header">' +
+                    '<div class="session-info">' +
+                        '<strong>Sesion HD:</strong> ' + sessionId.substring(0, 8) + ' | ' +
+                        '<strong>Puerto:</strong> ' + port + ' | ' +
+                        '<strong>Resolucion:</strong> 1920x1080' +
+                    '</div>' +
+                    '<div>' +
+                        '<span class="status-badge">Activa</span>' +
+                    '</div>' +
+                '</div>' +
+                '<iframe src="http://' + window.location.hostname + ':' + port + '/vnc.html?autoconnect=true&reconnect=true&resize=scale"></iframe>' +
+                '</div>' +
+                '<div class="controls">' +
+                    '<button class="btn-info" onclick="testConnection(' + port + ')">Probar Conexion</button>' +
+                    '<button class="btn-info" onclick="location.reload()">Recargar Sesion</button>' +
+                    '<button class="btn-danger" onclick="terminateSession()">Terminar Sesion</button>' +
+                    '<button class="btn-primary" onclick="openNewInstance()">Nueva Instancia</button>' +
+                '</div>';
+        }
+        
+        function openNewInstance() {
+            window.open('/', '_blank');
+        }
+        
+        function testConnection(port) {
+            var url = 'http://' + window.location.hostname + ':' + port + '/vnc.html';
+            fetch(url)
+                .then(function(r) {
+                    alert(r.ok ? 'Conexion OK' : 'Error: codigo ' + r.status);
+                })
+                .catch(function(err) {
+                    alert('Error de conexion: ' + err.message);
+                });
+        }
+        
+        function showError(message) {
+            var content = document.getElementById('content');
+            content.innerHTML = '<div class="error">' +
+                '<h2>Error</h2>' +
+                '<p>' + message + '</p>' +
+                '<button class="btn-primary" onclick="location.reload()">Reintentar</button>' +
+                '</div>';
+        }
+        
+        function terminateSession() {
+            if (confirm('Estas seguro?')) {
+                fetch('/api/instance/' + sessionId, { method: 'DELETE' })
+                    .then(function() {
+                        alert('Sesion terminada');
+                        window.close();
+                    });
+            }
+        }
+        
+        statusCheckInterval = setInterval(checkInstanceStatus, 2000);
+        checkInstanceStatus();
+        
+        setInterval(function() {
+            updateStats();
+            updateSessionTime();
+        }, 1000);
+        
+        updateStats();
+        
+        setInterval(function() {
+            fetch('/api/instance/' + sessionId + '/heartbeat', { method: 'POST' });
+        }, 30000);
+    </script>
+</body>
+</html>
+"""
 
-# Esperar a que VNC esté listo
-echo "Esperando a que VNC este listo..."
-for i in {1..30}; do
-    if netstat -ln 2>/dev/null | grep -q ":$VNC_PORT " || ss -ln 2>/dev/null | grep -q ":$VNC_PORT "; then
-        echo "OK - Servidor VNC listo en puerto $VNC_PORT"
-        break
-    fi
-    if [ $i -eq 30 ]; then
-        echo "ERROR: VNC no responde en puerto $VNC_PORT"
-        cat "$INSTANCE_DIR/vnc.log"
-        exit 1
-    fi
-    sleep 1
-done
+@app.route('/')
+def index():
+    """Pagina principal"""
+    session_id = str(uuid.uuid4())
+    cleanup_inactive_instances()
+    instance = create_instance(session_id)
+    
+    if instance is None:
+        return "Error: No se pueden crear mas instancias. Verifica los logs: docker logs -f sysbank_multi", 503
+    
+    return render_template_string(HTML_TEMPLATE, 
+                                 session_id=session_id, 
+                                 max_instances=MAX_INSTANCES)
 
-# [5/5] Iniciar noVNC
-echo "[5/5] Iniciando noVNC..."
-/opt/novnc/utils/novnc_proxy \
-    --vnc localhost:$VNC_PORT \
-    --listen $NOVNC_PORT \
-    > "$INSTANCE_DIR/novnc.log" 2>&1 &
-NOVNC_PID=$!
-echo $NOVNC_PID > "$INSTANCE_DIR/novnc.pid"
-echo "noVNC PID: $NOVNC_PID"
+@app.route('/api/stats')
+def stats():
+    return jsonify({
+        'active_instances': len(instances),
+        'max_instances': MAX_INSTANCES,
+        'uptime': time.time()
+    })
 
-sleep 3
+@app.route('/api/instance/<session_id>')
+def get_instance(session_id):
+    if session_id in instances:
+        instance = instances[session_id]
+        instance['last_access'] = time.time()
+        return jsonify({
+            'status': instance['status'],
+            'novnc_port': instance['novnc_port'],
+            'vnc_port': instance['vnc_port'],
+            'created_at': instance['created_at']
+        })
+    return jsonify({'status': 'not_found'}), 404
 
-# Verificar que noVNC está escuchando
-if netstat -ln 2>/dev/null | grep -q ":$NOVNC_PORT " || ss -ln 2>/dev/null | grep -q ":$NOVNC_PORT "; then
-    echo "OK - noVNC escuchando en puerto $NOVNC_PORT"
-else
-    echo "ADVERTENCIA: noVNC puede no estar escuchando en puerto $NOVNC_PORT"
-    cat "$INSTANCE_DIR/novnc.log"
-fi
+@app.route('/api/instance/<session_id>/heartbeat', methods=['POST'])
+def heartbeat(session_id):
+    if session_id in instances:
+        instances[session_id]['last_access'] = time.time()
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'not_found'}), 404
 
-# [6/6] Iniciar aplicación SysBank
-echo "[6/6] Iniciando aplicacion SysBank..."
-DISPLAY=$DISPLAY /app/sysbank > "$INSTANCE_DIR/sysbank.log" 2>&1 &
-APP_PID=$!
-echo $APP_PID > "$INSTANCE_DIR/app.pid"
-echo "SysBank PID: $APP_PID"
+@app.route('/api/instance/<session_id>', methods=['DELETE'])
+def delete_instance(session_id):
+    if stop_instance(session_id):
+        return jsonify({'status': 'deleted'})
+    return jsonify({'status': 'error'}), 500
 
-echo "========================================="
-echo "Instancia $INSTANCE_ID iniciada correctamente"
-echo "========================================="
-echo "PIDs guardados en: $INSTANCE_DIR"
-echo "Logs disponibles en: $INSTANCE_DIR/*.log"
-echo "========================================="
+@app.route('/api/instances')
+def list_instances():
+    return jsonify({
+        'instances': [{
+            'id': session_id,
+            'status': inst['status'],
+            'created_at': inst['created_at'],
+            'last_access': inst['last_access'],
+            'novnc_port': inst['novnc_port']
+        } for session_id, inst in instances.items()]
+    })
 
-# Mantener el script corriendo y monitorear procesos críticos
-while true; do
-    if ! kill -0 $XVFB_PID 2>/dev/null; then
-        echo "ERROR: Xvfb termino inesperadamente"
-        exit 1
-    fi
-    if ! kill -0 $VNC_PID 2>/dev/null; then
-        echo "ERROR: VNC termino inesperadamente"
-        exit 1
-    fi
-    if ! kill -0 $NOVNC_PID 2>/dev/null; then
-        echo "ERROR: noVNC termino inesperadamente"
-        exit 1
-    fi
-    sleep 10
-done
+if __name__ == '__main__':
+    if os.path.exists(INSTANCE_DIR):
+        import shutil
+        for item in os.listdir(INSTANCE_DIR):
+            item_path = os.path.join(INSTANCE_DIR, item)
+            try:
+                if os.path.isfile(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+            except Exception as e:
+                print("Error limpiando {}: {}".format(item_path, e))
+    
+    os.makedirs(INSTANCE_DIR, exist_ok=True)
+    
+    print("=" * 60)
+    print("SysBank Multi-Instancia HD iniciado")
+    print("=" * 60)
+    print("Accede en: http://localhost:8080")
+    print("Resolucion: 1920x1080 (Full HD)")
+    print("Maximo de instancias: {}".format(MAX_INSTANCES))
+    print("=" * 60)
+    
+    app.run(host='0.0.0.0', port=8080, debug=True, threaded=True)
