@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  sysbank:
+    build: .
+    image: sysbank:qt4
+    container_name: sysbank_app
+    # Configuración para mostrar la GUI en Windows
+    environment:
+      # Reemplazamos host.docker.internal por tu IP local real
+      - DISPLAY=192.168.1.5:0.0
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      # Mapear el directorio actual para persistencia o acceso a archivos si es necesario
+      - .:/app/data
+    # No es estrictamente necesario network_mode: host en Windows para X11, 
+    # pero aseguramos conectividad.

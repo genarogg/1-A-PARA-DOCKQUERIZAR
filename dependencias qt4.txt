@@ -1,0 +1,4 @@
+## DEPENDENCIAS QT 4 QUE SE DEBEN DOCKQUERIZAR
+## LISTA DE PAQUETES 
+libqtgui4 libqt4-network libqt4-opengl libqt4-sql libqt4-sql-psql libqtcore4 libqt4-xml
+
