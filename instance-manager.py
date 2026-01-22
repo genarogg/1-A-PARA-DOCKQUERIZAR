@@ -381,15 +381,23 @@ HTML_TEMPLATE = '''
                 <div class="vnc-container">
                     <div class="vnc-header">
                         <div class="session-info">
-                            <strong>Sesión:</strong> ${sessionId.substring(0, 8)}
+                            <strong>Sesión:</strong> ${sessionId.substring(0, 8)} | 
+                            <strong>Puerto noVNC:</strong> ${port}
                         </div>
                         <div>
                             <span class="status-badge">● Activa</span>
                         </div>
                     </div>
-                    <iframe src="http://${window.location.hostname}:${port}/vnc.html?autoconnect=true&reconnect=true"></iframe>
+                    <iframe 
+                        src="http://${window.location.hostname}:${port}/vnc.html?autoconnect=true&reconnect=true"
+                        onerror="handleIframeError()"
+                        onload="console.log('noVNC cargado en puerto ${port}')">
+                    </iframe>
                 </div>
                 <div class="controls">
+                    <button class="btn-info" onclick="testConnection(${port})">
+                        🔍 Probar Conexión
+                    </button>
                     <button class="btn-info" onclick="location.reload()">
                         🔄 Recargar Sesión
                     </button>
@@ -401,6 +409,28 @@ HTML_TEMPLATE = '''
                     </button>
                 </div>
             `;
+        }
+        
+        function testConnection(port) {
+            const url = `http://${window.location.hostname}:${port}/vnc.html`;
+            console.log('Probando conexión a:', url);
+            fetch(url)
+                .then(r => {
+                    if (r.ok) {
+                        alert('✓ Conexión OK - noVNC responde correctamente');
+                    } else {
+                        alert('✗ Error: noVNC responde pero con código ' + r.status);
+                    }
+                })
+                .catch(err => {
+                    alert('✗ Error de conexión: ' + err.message + '\n\nPuerto: ' + port);
+                    console.error('Error:', err);
+                });
+        }
+        
+        function handleIframeError() {
+            console.error('Error cargando iframe de noVNC');
+            showError('No se puede cargar la interfaz noVNC. Verifica los logs del contenedor.');
         }
         
         function showError(message) {
@@ -515,11 +545,25 @@ def list_instances():
     })
 
 if __name__ == '__main__':
-    # Limpiar instancias antiguas al iniciar
+    # Limpiar instancias antiguas al iniciar (solo archivos, no el directorio)
     if os.path.exists(INSTANCE_DIR):
         import shutil
-        shutil.rmtree(INSTANCE_DIR)
+        for item in os.listdir(INSTANCE_DIR):
+            item_path = os.path.join(INSTANCE_DIR, item)
+            try:
+                if os.path.isfile(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+            except Exception as e:
+                print(f"Error limpiando {item_path}: {e}")
+    
     os.makedirs(INSTANCE_DIR, exist_ok=True)
+    
+    print("=" * 50)
+    print("SysBank Multi-Instancia iniciado")
+    print("Accede en: http://localhost:8080")
+    print("=" * 50)
     
     # Iniciar servidor
     app.run(host='0.0.0.0', port=8080, debug=False, threaded=True)
