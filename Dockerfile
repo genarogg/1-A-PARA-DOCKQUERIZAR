@@ -1,35 +1,33 @@
-FROM debian:buster
+FROM debian:bullseye
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV DISPLAY=:1
+ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 
-# 🔧 Fix repos EOL
-RUN sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list && \
-    sed -i 's|security.debian.org|archive.debian.org|g' /etc/apt/sources.list && \
-    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid
-
-# 📦 Instalar todo
 RUN apt-get update && apt-get install -y \
+    sudo \
+    dbus dbus-x11 \
     xvfb \
     x11vnc \
-    dbus-x11 \
-    lxqt \
-    openbox \
-    qt4-default \
-    novnc \
-    websockify \
+    novnc websockify \
+    kde-standard \
+    plasma-workspace \
+    kwin-x11 \
     xterm \
+    fonts-dejavu \
+    net-tools \
     ca-certificates \
-    && apt-get clean
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 🧠 Usuario no-root (RECOMENDADO)
-RUN useradd -m qtuser
-USER qtuser
-WORKDIR /home/qtuser
+RUN useradd -m -s /bin/bash desktop && \
+    echo "desktop ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-COPY start.sh /start.sh
-USER root
-RUN chmod +x /start.sh
-USER qtuser
+WORKDIR /home/desktop
+COPY start.sh /home/desktop/start.sh
+RUN chmod +x /home/desktop/start.sh && \
+    chown desktop:desktop /home/desktop/start.sh
 
-EXPOSE 5900 6080
-CMD ["/start.sh"]
+USER desktop
+
+EXPOSE 6080 5901
+CMD ["/home/desktop/start.sh"]
