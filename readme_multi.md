@@ -189,7 +189,7 @@ Usuario 2 → http://localhost:8080 → Puerto 6081 → Instancia B (Full HD)
 ├── Dockerfile              # Imagen optimizada
 ├── docker-compose.yaml     # Configuración de servicios
 ├── instance-manager.py     # Gestor de instancias (Python)
-├── start-instance.sh       # Script de inicio (Bash)
+├── start-instances.sh       # Script de inicio (Bash)
 ├── setup.bat              # Instalador Windows
 ├── sysbank                # Ejecutable (tu aplicación)
 └── README.md              # Esta documentación
