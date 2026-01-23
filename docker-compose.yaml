@@ -1,11 +1,11 @@
 services:
   debian-desktop:
     image: dkge/debian-xfce-vnc:latest
-    container_name: debian-xfce
+    container_name: debian-xfce2
     ports:
       - "6080:6080"
     environment:
-      - VNC_PASSWORD=cambia_esta_password
+      - VNC_PASSWORD=1234
       - VNC_RESOLUTION=1920x1080
       - VNC_DEPTH=24
     volumes:
