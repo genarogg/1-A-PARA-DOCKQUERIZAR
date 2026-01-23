@@ -1,52 +1,8 @@
-version: '3.8'
-
 services:
-  sysbank-multi:
+  qt4-kde:
     build: .
-    image: sysbank:lxde-optimized
-    container_name: sysbank_multi
-    
+    container_name: qt4-kde
     ports:
-      - "8080:8080"           # Gestor web
-      - "5900-5950:5900-5950" # Puertos VNC
-      - "6080-6130:6080-6130" # Puertos noVNC
-    
-    environment:
-      # Resolución
-      - RESOLUTION=1920x1080x24
-      
-      # Qt optimizado
-      - QT_X11_NO_MITSHM=1
-      - QT_GRAPHICSSYSTEM=native
-      - QT_LOGGING_RULES=*.debug=false
-      
-      # OpenGL software rendering
-      - LIBGL_ALWAYS_SOFTWARE=1
-      - GALLIUM_DRIVER=llvmpipe
-      - LP_NUM_THREADS=8
-      - MESA_GL_VERSION_OVERRIDE=3.3
-      - MESA_GLSL_VERSION_OVERRIDE=330
-      
-      # Desactivar VSync
-      - vblank_mode=0
-      - __GL_SYNC_TO_VBLANK=0
-    
-    volumes:
-      - sysbank_data:/app/data
-      - sysbank_instances:/app/instances
-    
+      - "5900:5900"   # VNC
+      - "6080:6080"   # noVNC
     restart: unless-stopped
-    
-    # Recursos
-    shm_size: '4gb'
-    mem_limit: 8g
-    cpus: 4
-    
-    # Prioridad CPU
-    cpu_shares: 1024
-
-volumes:
-  sysbank_data:
-    driver: local
-  sysbank_instances:
-    driver: local
