@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Sysbank
-Exec=/usr/local/bin/sysbank
-Terminal=false
-StartupNotify=false
-X-KDE-autostart-phase=1
