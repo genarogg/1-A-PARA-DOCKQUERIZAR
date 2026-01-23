@@ -1,0 +1,14 @@
+services:
+  qt4-kde:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: qt4-kde
+    ports:
+      - "5901:5901"   # VNC (corregido)
+      - "6080:6080"   # noVNC
+    volumes:
+      - ./sysbank:/usr/local/bin/sysbank:ro  # Montar el binario
+    restart: unless-stopped
+    stdin_open: true
+    tty: true

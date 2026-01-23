@@ -1,11 +1,13 @@
 services:
-  qt4-kde:
-    build: .
-    container_name: qt4-kde
+  debian-desktop:
+    image: dkge/debian-xfce-vnc:latest
+    container_name: debian-xfce
     ports:
-      - "5901:5901"   # VNC (corregido)
-      - "6080:6080"   # noVNC
+      - "6080:6080"
+    environment:
+      - VNC_PASSWORD=cambia_esta_password
+      - VNC_RESOLUTION=1920x1080
+      - VNC_DEPTH=24
+    volumes:
+      - ./data:/opt/data
     restart: unless-stopped
-    # Añadido para mejor diagnóstico
-    stdin_open: true
-    tty: true
