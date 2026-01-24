@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  sysbank:
+    build: .
+    image: sysbank:qt4
+    container_name: sysbank_app
+    environment:
+      - DISPLAY=${DISPLAY}        # Usa el DISPLAY del host Linux
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - .:/app/data
+      - /tmp/.X11-unix:/tmp/.X11-unix  # Conecta el socket X11
+    network_mode: "host"  # Opcional, facilita comunicación X11
